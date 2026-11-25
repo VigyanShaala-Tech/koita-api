@@ -25,7 +25,7 @@ GitHub → repo → Settings → Deploy keys → Add key → paste it, leave "Al
 ```
 printf "Host github.com\n  IdentityFile ~/.ssh/koita_deploy\n" >> ~/.ssh/config
 sudo mkdir -p /opt/koita-api && sudo chown ubuntu /opt/koita-api
-git clone git@github.com:OWNER/REPO.git /opt/koita-api
+git clone git@github.com:VigyanShaala-Tech/koita-api.git /opt/koita-api
 ```
 `.env` is not in GitHub (it's in `.gitignore`): production gets fresh secrets in step 3.
 
