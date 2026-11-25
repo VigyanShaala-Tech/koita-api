@@ -1,89 +1,124 @@
-# Deploying the Koita KPI API
+# Deploying the Koita KPI API (AWS EC2 behind the existing load balancer)
 
-Target: an Ubuntu/Debian Linux server you can SSH into with sudo, for example the one that runs
-dashboard.vigyanshaala.in. Result: `https://api.vigyanshaala.in/getToken` and `/getdata`, always on.
+Result: `https://koita-api.vigyanshaala.in/getToken` and `/getdata`, always on.
+The EC2 instance already sits behind an AWS Application Load Balancer (security group `ALB-SG`), the same way
+Metabase (port 3000) and the 850x apps do. The ALB handles HTTPS, so there is no nginx or certbot.
 
 ```
-DesignScape --HTTPS--> nginx :443 --> main.py on 127.0.0.1:8000 --> Metabase
-                       (certbot cert)   (systemd keeps it running)
+DesignScape --HTTPS--> ALB (AWS certificate) --HTTP :8000--> main.py on EC2 --> Metabase
+                       rule: host = koita-api.vigyanshaala.in    (systemd keeps it running)
 ```
 
-## 1. DNS (whoever manages the vigyanshaala.in domain)
-Add an **A record**: `api` → the server's public IP. Check it from your PC: `nslookup api.vigyanshaala.in`.
+## Part A: on the EC2 instance (web terminal)
 
-On **AWS EC2**: in the instance's Security Group allow inbound **80 and 443** from anywhere, and
-use an **Elastic IP** so the address doesn't change when the instance restarts. Don't open 8000.
-
-## 2. Get the code from GitHub (on EC2)
-The repo is private, so give EC2 a **read-only deploy key** (it can pull this one repo, nothing else):
+### 1. Check port 8000 is free
 ```
-ssh -i your-key.pem ubuntu@EC2_IP
+whoami                          # should print: ubuntu
+python3 --version               # 3.8 or newer
+sudo ss -tlnp | grep ':8000 '   # should print nothing. If something shows, pick another port (e.g. 8506) and use it everywhere below
+```
+
+### 2. Install and create the service user
+```
+sudo apt update && sudo apt install -y git python3
+sudo useradd --system --no-create-home koita
+```
+
+### 3. Get the code from GitHub
+The repo is private, so EC2 gets a **read-only deploy key** that can pull this one repo and nothing else:
+```
 ssh-keygen -t ed25519 -f ~/.ssh/koita_deploy -N ""
 cat ~/.ssh/koita_deploy.pub
 ```
-GitHub → repo → Settings → Deploy keys → Add key → paste it, leave "Allow write access" **off**. Then:
+GitHub → VigyanShaala-Tech/koita-api → Settings → Deploy keys → Add deploy key → paste it.
+Leave "Allow write access" **off**. Then:
 ```
 printf "Host github.com\n  IdentityFile ~/.ssh/koita_deploy\n" >> ~/.ssh/config
 sudo mkdir -p /opt/koita-api && sudo chown ubuntu /opt/koita-api
 git clone git@github.com:VigyanShaala-Tech/koita-api.git /opt/koita-api
 ```
-`.env` is not in GitHub (it's in `.gitignore`): production gets fresh secrets in step 3.
+Answer `yes` if it asks whether to trust github.com.
 
-## 3. Install on the server
+### 4. Secrets file (`.env` is never in GitHub)
 ```
-sudo apt update && sudo apt install -y python3 nginx certbot python3-certbot-nginx
-sudo useradd --system --no-create-home koita
 cd /opt/koita-api
-sudo cp .env.example .env
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # run twice: one for KOITA_API_SECRET, one for JWT_SECRET
-sudo nano /opt/koita-api/.env
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+cp .env.example .env
+nano .env
 ```
-In `.env` set:
+Set:
 - `METABASE_URL=https://dashboard.vigyanshaala.in`
-- `METABASE_API_KEY=` the koita-api key (same one as on your PC, or a fresh one from Admin → API keys in the same group)
+- `METABASE_API_KEY=` the koita-api Metabase key (copy from your PC's `.env`)
 - `METABASE_CARD_ID=625`
 - `KOITA_API_USER=designscape`
-- `KOITA_API_SECRET=` new random value #1 (this is what DesignScape gets)
-- `JWT_SECRET=` new random value #2 (never leaves the server)
-- leave `TOKEN_TTL_SECONDS=3600` and `PORT=8000`
+- `KOITA_API_SECRET=` random value #1 (this is what DesignScape gets)
+- `JWT_SECRET=` random value #2 (never leaves the server)
+- `PORT=8000`
+- `HOST=0.0.0.0` (so the load balancer can reach it; the security group in step 7 blocks everyone else)
 
-Lock it down: only the service can read the secrets (the code stays owned by ubuntu so `git pull` works).
+Save with Ctrl+O, Enter, then Ctrl+X. Then lock the file:
 ```
-sudo chown koita:koita /opt/koita-api/.env
-sudo chmod 600 /opt/koita-api/.env
+sudo chown koita:koita .env && sudo chmod 600 .env
 ```
 
-## 4. Keep it running (systemd)
+### 5. Start it and keep it running (systemd)
 ```
 sudo cp deploy/koita-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now koita-api
-sudo systemctl status koita-api          # should say "active (running)"
-curl -s localhost:8000/getdata           # should print {"error": "missing, invalid or expired token"}
+sudo systemctl status koita-api --no-pager     # should say: active (running)
+curl -s localhost:8000/health                  # should print {"ok": true}
 ```
-If it fails to start: `sudo journalctl -u koita-api -n 30`.
+If it fails: `sudo journalctl -u koita-api -n 30 --no-pager`. This shows errors, not secrets.
 
-## 5. HTTPS (nginx + free Let's Encrypt certificate)
-```
-sudo cp deploy/nginx-koita-api.conf /etc/nginx/sites-available/koita-api
-sudo ln -s /etc/nginx/sites-available/koita-api /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d api.vigyanshaala.in --redirect
-```
-certbot renews the certificate automatically. Firewall: ports 80 and 443 open; port 8000 stays closed
-(main.py only listens on 127.0.0.1 anyway).
+## Part B: AWS console
 
-## 6. Test from your PC, exactly as DesignScape will
-```
-curl -s -X POST https://api.vigyanshaala.in/getToken -H "Content-Type: application/json" -d "{\"user\":\"designscape\",\"secret\":\"PASTE_SECRET\"}"
-curl -s "https://api.vigyanshaala.in/getdata?dt=01-Oct-2026" -H "Authorization: token PASTE_TOKEN"
-```
-Expect the token, then the 10 KPIs. Clear your terminal afterwards: the secret is in its history.
+### 6. Target group
+EC2 → Target Groups → **Create target group**:
+- Target type **Instances**, name `koita-api-tg`, protocol **HTTP**, port **8000**, same VPC as the instance.
+- Health check path **`/health`**.
+- Next → tick this EC2 instance → **Include as pending below** → Create.
 
-## 7. Hand over to DesignScape
-- Send them: the two URLs, the `dt` format (`01-Oct-2026`), "token valid 1 hour", and the 10 field names.
-- Send `KOITA_API_SECRET` separately and securely (password-manager share or a one-time-secret link),
-  never in the same email as the URL.
+### 7. Security group: let only the ALB reach port 8000
+The instance's security group → Edit inbound rules → **Add rule**:
+Custom TCP, port **8000**, source **`sg-07822b6e0ca6344d0` (ALB-SG)**. This is the same pattern as the 3000/850x rules.
+Do not use 0.0.0.0/0.
+
+### 8. Certificate
+EC2 → Load Balancers → the ALB → **Listeners** → HTTPS:443 → look at its certificate(s).
+- If it is `*.vigyanshaala.in`, it already covers the new name. Go to step 9.
+- If not: Certificate Manager (ACM, same region) → Request → `koita-api.vigyanshaala.in` → DNS validation →
+  add the CNAME it shows at your DNS provider → wait for "Issued" → back on the listener: **Certificates → Add** it.
+
+### 9. Listener rule
+Same HTTPS:443 listener → **Manage rules → Add rule**:
+- Condition: **Host header** = `koita-api.vigyanshaala.in`
+- Action: **Forward to** `koita-api-tg`
+- Any free priority number. Save.
+
+Target Groups → `koita-api-tg` → Targets should turn **healthy** within about a minute.
+
+### 10. DNS
+At your DNS provider, find the existing record for `dashboard.vigyanshaala.in` and copy what it points to
+(the ALB's DNS name, `xxxx.elb.amazonaws.com`). Add a new record:
+- **CNAME** `koita-api` → that same ALB DNS name. On Route 53, use an **A record, Alias** → the ALB instead.
+- On Cloudflare: **DNS only** (grey cloud).
+
+## Part C: test from your PC (PowerShell)
+```
+curl.exe -s https://koita-api.vigyanshaala.in/health
+```
+Expect `{"ok": true}`. Then the real calls, exactly as DesignScape makes them:
+```
+curl.exe -s -X POST https://koita-api.vigyanshaala.in/getToken -H "Content-Type: application/json" -d '{\"user\":\"designscape\",\"secret\":\"PASTE_SECRET\"}'
+curl.exe -s "https://koita-api.vigyanshaala.in/getdata?dt=01-Oct-2026" -H "Authorization: token PASTE_TOKEN"
+```
+Afterwards, clear the history: `Clear-History` and close the window.
+
+## Hand over to DesignScape
+- One message: the two URLs, the `dt` format (`01-Oct-2026`), "token valid 1 hour", and the 10 field names.
+- `KOITA_API_SECRET` separately and securely (password-manager share or a one-time-secret link).
 - Never share `JWT_SECRET` or the Metabase API key.
 
 ## Updating later

@@ -36,8 +36,11 @@ from datetime import date
 
 def raw(data):
     s = socket.create_connection(("127.0.0.1", api.server_port), timeout=3)
-    s.sendall(data); out = s.recv(4096).decode(); s.close(); return out
+    s.sendall(data); out = b""
+    while chunk := s.recv(4096): out += chunk  # server closes after an error reply
+    s.close(); return out.decode()
 
+assert call("/health") == (200, {"ok": True})
 assert call("/getToken", {"user": "u", "secret": "bad"})[0] == 401
 assert call("/getToken", {"user": "u", "secret": "pässwörd"})[0] == 401          # crashed before
 assert call("/getToken", {"user": "u"})[0] == 400

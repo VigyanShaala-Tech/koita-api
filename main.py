@@ -27,6 +27,7 @@ API_SECRET = os.environ["KOITA_API_SECRET"]
 SIGN_KEY = os.environ["JWT_SECRET"].encode()
 TTL = int(os.environ.get("TOKEN_TTL_SECONDS", "3600"))
 PORT = int(os.environ.get("PORT", "8000"))
+HOST = os.environ.get("HOST", "127.0.0.1")  # 0.0.0.0 behind the AWS ALB; security group limits who connects
 for _name, _val in (("KOITA_API_SECRET", API_SECRET), ("JWT_SECRET", os.environ["JWT_SECRET"])):
     if len(_val) < 16 or _val.startswith("change-me"):
         raise SystemExit(f"{_name} in .env must be a long random value")
@@ -111,6 +112,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if url.path == "/health":  # load balancer health check
+            return self.send(200, {"ok": True})
         if url.path != "/getdata":
             return self.send(404, {"error": "not found"})
         auth = self.headers.get("Authorization", "")
@@ -128,5 +131,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Listening on http://127.0.0.1:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"Listening on http://{HOST}:{PORT}")
+    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
