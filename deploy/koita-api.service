@@ -1,0 +1,21 @@
+# /etc/systemd/system/koita-api.service
+# Keeps main.py running, restarts it if it crashes, starts it on boot.
+[Unit]
+Description=Koita KPI API for DesignScape
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=koita
+WorkingDirectory=/opt/koita-api
+ExecStart=/usr/bin/python3 -u main.py
+Restart=always
+RestartSec=5
+# Lock it down: it only needs to read its own folder and call Metabase.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
